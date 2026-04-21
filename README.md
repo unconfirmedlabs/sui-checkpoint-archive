@@ -6,7 +6,6 @@ Live endpoints:
 
 - Mainnet proxy: `https://checkpoints.mainnet.sui.unconfirmed.cloud`
 - Mainnet bucket: `https://archive.checkpoints.mainnet.sui.unconfirmed.cloud`
-- Testnet proxy: `https://checkpoints.testnet.sui.unconfirmed.cloud`
 
 ## Quick start
 
