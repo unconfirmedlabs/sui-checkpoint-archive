@@ -48,6 +48,48 @@ This is a monorepo with four components:
 
 The **ingester** fetches every checkpoint in an epoch from `checkpoints.mainnet.sui.io` in parallel, decodes and BLS-verifies each `CheckpointSummary` against the epoch's validator committee (bootstrapped from the previous epoch's end-of-epoch checkpoint), and concatenates the raw zstd frames into a single `epoch-N.zst` object in R2 with a 20-byte-per-checkpoint `epoch-N.idx` side-car. One D1 row per epoch records the routing metadata and SHA256 integrity hashes. The **proxy** serves `GET /:seq.binpb.zst` by looking up the epoch in D1, doing a 20-byte range read on the `.idx` for the offset, then a ranged `GET` on the `.zst` for the frame — all cached at the edge, so warm reads are sub-30ms and skip both D1 and R2 entirely. The **client SDK** caches routing and idx files locally so repeat lookups on the same epoch are near-free, and exposes a `getEpochArchive` path that bypasses the proxy entirely for bulk workloads.
 
+## Verification
+
+Every checkpoint in the archive has been BLS-verified at ingest time, independently of Sui's upstream archive. The verifier is a small shared Rust crate (`verifier/`) built on two dependencies:
+
+- [`sui-sdk-types`](https://crates.io/crates/sui-sdk-types) — official MystenLabs types and BCS encoding for `CheckpointSummary`, `Committee`, etc.
+- [`blst`](https://crates.io/crates/blst) — Supranational's BLS12-381 implementation, the same library Sui validators use to produce signatures.
+
+### What it proves
+
+Per checkpoint, the verifier checks that the aggregate signature in the checkpoint envelope was produced by a quorum (≥2f+1 stake) of the validator committee for that checkpoint's epoch, over the correct intent-prefixed message. If that check passes, the checkpoint's contents are cryptographically authenticated — anyone holding the correct committee for the epoch can verify independently.
+
+### The verification steps
+
+1. **Decompress** the `.binpb.zst` frame to raw protobuf.
+2. **Parse** `CheckpointData` → `CheckpointSummary` from BCS.
+3. **Build the intent message**: `[0x02, 0x00, 0x00] ++ bcs(CheckpointSummary) ++ u64_le(epoch)`. The 3-byte intent prefix is Sui's domain separation for checkpoint signatures; the trailing epoch disambiguates across committees.
+4. **Decode the signer set** from the signature's portable `RoaringBitmap` (cookie `12346`). Each bit position indexes into the committee's ordered validator list.
+5. **Aggregate** the selected validators' public keys using `blst::min_pk`.
+6. **Verify** the BLS12-381 aggregate signature over the intent message against the aggregated public key. One pairing check.
+7. **Stake quorum check**: confirm the signing validators' stake sums to a supermajority of the committee's total. (A signature from 1% of validators would pass the crypto but not the quorum gate.)
+
+Any failure at any step aborts the whole epoch's ingest. Nothing enters the archive without a valid quorum signature from the correct committee.
+
+### Committee bootstrapping
+
+To verify checkpoints in epoch N, the verifier needs epoch N's validator committee. Where does it come from?
+
+- **Epoch 0**: no predecessor. The genesis committee is the trust anchor; Sui publishes it alongside the network config. Checkpoints in epoch 0 are archived without BLS verification by design (there's nothing to verify them against independently).
+- **Epoch N > 0**: derived from the `next_epoch_committee` field of the **last checkpoint of epoch N-1** (the "end-of-epoch checkpoint"). That checkpoint is itself signed by epoch N-1's committee, which was in turn derived from epoch N-2, and so on back to genesis.
+
+The ingester bootstraps each epoch's committee from the predecessor epoch's EoE checkpoint just before starting the ingest. That request is a small, uncached fetch against Sui's upstream archive; subsequent per-checkpoint verifications reuse the bootstrapped committee in memory.
+
+### Who runs the verifier
+
+| Component | When | Status |
+|-----------|------|--------|
+| **ingester** (native Rust) | Every checkpoint at ingest, unconditionally. Abort-on-fail. | Live. Zero failures across the full mainnet backfill. |
+| **TS client SDK** (wasm-compiled) | Optional, via `new SuiArchiveClient({ verify: true })`. Lazy-loads the wasm bundle on first call. | Interface wired, wasm build pending. Today the `verify: true` path throws with a clear message pointing users at the Rust crate for re-verification. |
+| **Standalone Rust crate** | Anyone can depend on `sui-checkpoint-verifier = { path = "./verifier" }` and verify arbitrary checkpoint bytes. | Works today. |
+
+The point of exposing verification at the *client* as well as the ingester is to remove us from the trust path: a client that re-verifies doesn't have to take our word that the bytes are authentic, even if we've been compromised or we misbehave. The BLS signatures are the ground truth; we're just a cache in front of them.
+
 ## Benchmarks
 
 All numbers below are from a single Bun process with HTTP/2 connection pooling, run against the live mainnet proxy from an ingester VM in Los Angeles (same CF region as the R2 origin). Real-world latency from other regions is dominated by distance to the nearest Cloudflare PoP, typically 5 to 30 ms in major metros.
