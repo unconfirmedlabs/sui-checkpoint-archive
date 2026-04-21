@@ -1,4 +1,4 @@
-# sui-checkpoint-archive
+# Sui Checkpoint Archive
 
 A BLS-verified archive of every Sui checkpoint ever produced, served from Cloudflare's edge network with optional client-side re-verification.
 
