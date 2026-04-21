@@ -31,7 +31,7 @@ const client = new SuiArchiveClient({ cacheDir: "~/.cache/sui-archive" });
 const { bytes, epoch } = await client.getCheckpoint(12_345_678);
 ```
 
-Longer-form walkthrough of the architecture, cost math, and benchmarks in [`ANNOUNCEMENT.md`](./ANNOUNCEMENT.md).
+Architecture details and cost analysis in the [Benchmarks](#benchmarks) and [How it works](#how-it-works-one-paragraph) sections below.
 
 ## Repository layout
 
@@ -47,6 +47,51 @@ This is a monorepo with four components:
 ## How it works (one-paragraph)
 
 The **ingester** fetches every checkpoint in an epoch from `checkpoints.mainnet.sui.io` in parallel, decodes and BLS-verifies each `CheckpointSummary` against the epoch's validator committee (bootstrapped from the previous epoch's end-of-epoch checkpoint), and concatenates the raw zstd frames into a single `epoch-N.zst` object in R2 with a 20-byte-per-checkpoint `epoch-N.idx` side-car. One D1 row per epoch records the routing metadata and SHA256 integrity hashes. The **proxy** serves `GET /:seq.binpb.zst` by looking up the epoch in D1, doing a 20-byte range read on the `.idx` for the offset, then a ranged `GET` on the `.zst` for the frame — all cached at the edge, so warm reads are sub-30ms and skip both D1 and R2 entirely. The **client SDK** caches routing and idx files locally so repeat lookups on the same epoch are near-free, and exposes a `getEpochArchive` path that bypasses the proxy entirely for bulk workloads.
+
+## Benchmarks
+
+All numbers below are from a single Bun process with HTTP/2 connection pooling, run against the live mainnet proxy from an ingester VM in Los Angeles (same CF region as the R2 origin). Real-world latency from other regions is dominated by distance to the nearest Cloudflare PoP, typically 5 to 30 ms in major metros.
+
+**Warm cache (edge hits, no origin round-trip):**
+
+| Concurrency | Throughput | p50 | p95 | p99 |
+|------------:|-----------:|----:|----:|----:|
+| 32 | 1,490 req/s | 20 ms | 32 ms | 45 ms |
+| 128 | 7,570 req/s | 15 ms | 30 ms | 46 ms |
+| 256 | **14,590 req/s** | **14 ms** | 32 ms | 64 ms |
+
+The warm path serves entirely from CF edge RAM. The Worker, D1, and R2 are bypassed. Throughput scales with concurrency until client-side bottlenecks.
+
+**Cold path (D1 query plus two R2 range reads on every request):**
+
+| Concurrency | Throughput | p50 | p95 | p99 |
+|------------:|-----------:|----:|----:|----:|
+| 32 | 62 req/s | 423 ms | 1,023 ms | 1,794 ms |
+| 128 | **192 req/s** | 529 ms | 879 ms | 1,121 ms |
+| 256 | 217 req/s | 1,099 ms | 1,396 ms | 1,596 ms |
+
+Cold throughput plateaus around 200 req/s because every miss does three serial steps: a D1 lookup to find the epoch, a 20-byte range read on the `.idx` for the offset, and a ranged `GET` on the `.zst` for the frame. 128 is the sweet spot for cold-heavy workloads.
+
+**Metadata endpoints:**
+
+| Endpoint | p50 | p99 | Response |
+|----------|----:|----:|---------:|
+| `/epochs` (full listing, 1,103 rows) | 250 ms | 519 ms | 359 KB JSON |
+| `/epochs/:N` | 87 ms | 131 ms | ~400 B JSON |
+| `/health` | 64 ms | 80 ms | small JSON |
+
+**Cost comparison — why the per-epoch architecture matters:**
+
+For the full mainnet backfill (266.9M checkpoints across 1,103 epochs, 13.4 TB):
+
+| Architecture | Class A ops | One-time ingest cost |
+|--------------|------------:|---------------------:|
+| Per-checkpoint (naive, 1 PutObject each) | 266.9M | $1,201 |
+| **Per-epoch (concatenated `.zst` + `.idx`)** | **~404K** | **$1.82** |
+
+~660× cheaper on Class A operations. Bulk whole-archive downloads are ~240,000× cheaper (1,103 GetObjects versus 266.9M).
+
+In practice, real clients hit a mix of warm and cold URLs, with warm dominating over time as the hot set of recently-requested checkpoints populates each PoP's edge cache. A client following the chain tip or scanning a contiguous range of recent epochs sees warm-cache latency after the first request to each URL.
 
 ## Operating the archive yourself
 
