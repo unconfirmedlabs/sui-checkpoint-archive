@@ -1,0 +1,49 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sui-checkpoint-archive-proxy",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-19",
+  "observability": { "enabled": true },
+
+  "vars": { "NETWORK": "mainnet" },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sui-checkpoint-proxy-mainnet",
+      "database_id": "0709871e-708b-4fd0-827c-336e97f1a97d",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "sui-checkpoint-archive-mainnet"
+    }
+  ],
+  "routes": [
+    { "pattern": "checkpoints.mainnet.sui.unconfirmed.cloud", "custom_domain": true }
+  ],
+
+  "env": {
+    "testnet": {
+      "vars": { "NETWORK": "testnet" },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "sui-checkpoint-proxy-testnet",
+          "database_id": "dfd83936-49bb-4732-a753-a91804867cd3",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "BUCKET",
+          "bucket_name": "sui-checkpoint-archive-testnet"
+        }
+      ],
+      "routes": [
+        { "pattern": "checkpoints.testnet.sui.unconfirmed.cloud", "custom_domain": true }
+      ]
+    }
+  }
+}

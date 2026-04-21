@@ -1,0 +1,47 @@
+[package]
+name = "sui-checkpoint-ingester"
+version = "0.1.0"
+edition = "2021"
+description = "Ingester for Sui checkpoint archive: per-epoch .zst + .idx files on R2 + D1 routing rows."
+
+[[bin]]
+name = "sui-checkpoint-ingester"
+path = "src/main.rs"
+
+[dependencies]
+# Shared verifier (native + wasm targets). Owns all BCS / BLS / roaring logic.
+sui-checkpoint-verifier = { path = "../verifier" }
+
+# Async runtime + HTTP + CLI.
+tokio               = { version = "1", features = ["full"] }
+reqwest             = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+clap                = { version = "4", features = ["derive", "env"] }
+
+# AWS SDK for S3-compatible access to R2. We pin rustls-only to avoid pulling
+# in aws-lc-sys (which needs platform-specific C/asm and breaks cross-compile).
+aws-config          = { version = "1", default-features = false, features = [
+  "behavior-version-latest", "rustls", "rt-tokio",
+] }
+aws-sdk-s3          = { version = "1", default-features = false, features = [
+  "http-1x", "rustls", "rt-tokio",
+] }
+
+# Ergonomic error handling + logging.
+anyhow              = "1"
+thiserror           = "1"
+tracing             = "0.1"
+tracing-subscriber  = { version = "0.3", features = ["env-filter"] }
+
+# Protobuf helpers — we do a tiny hand-rolled extract of the 2 fields we need.
+bytes               = "1"
+
+# Ordered concurrency utilities.
+futures             = "0.3"
+
+# Integrity / hashing.
+sha2                = "0.10"
+hex                 = "0.4"
+
+# JSON for the epoch-result output + D1 REST bodies.
+serde               = { version = "1", features = ["derive"] }
+serde_json          = "1"

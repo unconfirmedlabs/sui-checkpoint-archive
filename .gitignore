@@ -1,0 +1,30 @@
+# Rust build artifacts
+target/
+**/target/
+Cargo.lock
+!ingester/Cargo.lock
+!verifier/Cargo.lock
+
+# TypeScript / Bun
+node_modules/
+dist/
+build/
+.wrangler/
+.dev.vars
+
+# Env files (real credentials)
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
+
+# Ingester state / logs
+*.log
+/tmp/ingest-*.err

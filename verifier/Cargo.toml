@@ -1,0 +1,39 @@
+[package]
+name = "sui-checkpoint-verifier"
+version = "0.1.0"
+edition = "2021"
+description = "Zero-allocation checkpoint verifier. Native + WASM targets."
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+# Default = native build (linked into the ingester).
+# WASM build should enable "wasm" and omit other features.
+default = []
+wasm    = []
+
+[dependencies]
+# Official Sui BCS type definitions. We use CheckpointSummary for end-of-epoch
+# committee extraction; `serde` feature gates the actual Deserialize derive.
+sui-sdk-types = { version = "0.3", features = ["serde"] }
+bcs           = "0.1"
+
+# BLS12-381 min-sig, portable C. Same underlying library fastcrypto wraps;
+# direct dep keeps the wasm build free of secp256k1 etc.
+blst          = { version = "0.3", features = ["portable"] }
+
+# Pure-Rust zstd decoder (works on native + wasm32 without any C toolchain).
+ruzstd        = { version = "0.8", default-features = false, features = ["std"] }
+
+# Ergonomic error handling.
+anyhow        = { version = "1", default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Nothing target-specific right now.
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# fastcrypto transitively pulls in `getrandom`; enable the `js` backend so the
+# wasm build resolves. Actual verification is deterministic; randomness is only
+# touched by unused code paths.
+getrandom = { version = "0.2", features = ["js"] }
