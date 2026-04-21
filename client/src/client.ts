@@ -95,7 +95,7 @@ export class SuiArchiveClient {
     const epoch = await this.findEpoch(s);
     if (!epoch) throw new NotIndexedError(s);
 
-    const url = `${this.baseUrl}/${s}`;
+    const url = `${this.baseUrl}/${s}.binpb.zst`;
     const resp = await this.fetchImpl(url);
     if (!resp.ok) throw new HttpError(resp.status, url, await resp.text());
     const bytes = new Uint8Array(await resp.arrayBuffer());

@@ -32,7 +32,7 @@ If BLS verification fails on any checkpoint, the whole epoch aborts. Nothing ent
 
 **The proxy** is a Cloudflare Worker written in Hono/TypeScript. It exposes a small API:
 
-- `GET /:seq` returns the raw `.binpb.zst` bytes for a single checkpoint, resolved by a single D1 query, a 20-byte range read of the epoch's `.idx`, and a final ranged `GET` against R2.
+- `GET /:seq.binpb.zst` returns the raw `.binpb.zst` bytes for a single checkpoint, resolved by a single D1 query, a 20-byte range read of the epoch's `.idx`, and a final ranged `GET` against R2.
 - `GET /epochs` returns metadata for every indexed epoch.
 - `GET /epochs/:N` returns metadata for one epoch, including object keys so clients can pull the whole epoch directly from R2 for bulk work.
 - `GET /health` returns summary stats.
@@ -62,7 +62,7 @@ Range reads benefit from the same structure. Instead of exposing a ``range endpo
 
 **D1 stores only what isn't derivable.** No per-checkpoint rows, no object keys that follow convention, no counts that can be computed. Six columns total: epoch, first_seq, last_seq, zst_bytes, zst_sha256, idx_sha256. One row per epoch. 1,103 rows for all of Sui mainnet history. D1 queries at this size are effectively instant.
 
-**Edge caching as a first-class deployment layer.** Every `/:seq` response gets `cache-control: public, max-age=31536000, immutable` and is stored in Cloudflare's Cache API. After the first hit on any edge PoP, subsequent requests in that region skip the Worker runtime, skip D1, skip R2, and return from edge RAM. This is the primary mechanism that makes the service scale for free.
+**Edge caching as a first-class deployment layer.** Every `/:seq.binpb.zst` response gets `cache-control: public, max-age=31536000, immutable` and is stored in Cloudflare's Cache API. After the first hit on any edge PoP, subsequent requests in that region skip the Worker runtime, skip D1, skip R2, and return from edge RAM. This is the primary mechanism that makes the service scale for free.
 
 **Worker and R2 in the same provider.** The binding between the Worker and R2 is a direct API call within Cloudflare's private backbone. There is no public internet hop between them on cache misses. No request signing, no TLS handshake per call. This keeps miss-path latency low.
 
@@ -118,7 +118,7 @@ Fetch one checkpoint by sequence number:
 
 ```bash
 curl -o checkpoint.binpb.zst \
-  https://checkpoints.mainnet.sui.unconfirmed.cloud/12345678
+  https://checkpoints.mainnet.sui.unconfirmed.cloud/12345678.binpb.zst
 zstd -d checkpoint.binpb.zst -o checkpoint.binpb
 ```
 

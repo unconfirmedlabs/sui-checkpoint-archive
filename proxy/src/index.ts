@@ -155,11 +155,14 @@ app.get("/epochs/:epoch", async (c) => {
 // BLS-verified at ingest; clients who want to re-verify use the shared
 // `sui-checkpoint-verifier` crate (see README).
 //
-// Path is just the seq: the subdomain already qualifies the resource type
-// as checkpoints. Regex guard prevents overlap with /health, /epochs/*.
-app.get("/:seq{[0-9]+}", async (c) =>
+// URL mirrors Sui's upstream archive shape (checkpoints.mainnet.sui.io/:seq.binpb.zst)
+// so consumers can swap domains without changing the rest of the URL. The
+// explicit extension also gives `curl -O` the right filename for free and
+// leaves room for future format variants (e.g. /:seq.json) in a disjoint
+// URL namespace.
+app.get("/:file{[0-9]+\\.binpb\\.zst}", async (c) =>
   withEdgeCache(c, async () => {
-    const raw = c.req.param("seq");
+    const raw = c.req.param("file").replace(/\.binpb\.zst$/, "");
     let seq: bigint;
     try {
       seq = BigInt(raw);

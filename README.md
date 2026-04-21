@@ -12,8 +12,7 @@ Live endpoints:
 Fetch a single checkpoint by sequence number:
 
 ```bash
-curl -o 12345678.binpb.zst \
-  https://checkpoints.mainnet.sui.unconfirmed.cloud/12345678
+curl -O https://checkpoints.mainnet.sui.unconfirmed.cloud/12345678.binpb.zst
 zstd -d 12345678.binpb.zst -o 12345678.binpb
 ```
 
@@ -47,7 +46,7 @@ This is a monorepo with four components:
 
 ## How it works (one-paragraph)
 
-The **ingester** fetches every checkpoint in an epoch from `checkpoints.mainnet.sui.io` in parallel, decodes and BLS-verifies each `CheckpointSummary` against the epoch's validator committee (bootstrapped from the previous epoch's end-of-epoch checkpoint), and concatenates the raw zstd frames into a single `epoch-N.zst` object in R2 with a 20-byte-per-checkpoint `epoch-N.idx` side-car. One D1 row per epoch records the routing metadata and SHA256 integrity hashes. The **proxy** serves `GET /:seq` by looking up the epoch in D1, doing a 20-byte range read on the `.idx` for the offset, then a ranged `GET` on the `.zst` for the frame — all cached at the edge, so warm reads are sub-30ms and skip both D1 and R2 entirely. The **client SDK** caches routing and idx files locally so repeat lookups on the same epoch are near-free, and exposes a `getEpochArchive` path that bypasses the proxy entirely for bulk workloads.
+The **ingester** fetches every checkpoint in an epoch from `checkpoints.mainnet.sui.io` in parallel, decodes and BLS-verifies each `CheckpointSummary` against the epoch's validator committee (bootstrapped from the previous epoch's end-of-epoch checkpoint), and concatenates the raw zstd frames into a single `epoch-N.zst` object in R2 with a 20-byte-per-checkpoint `epoch-N.idx` side-car. One D1 row per epoch records the routing metadata and SHA256 integrity hashes. The **proxy** serves `GET /:seq.binpb.zst` by looking up the epoch in D1, doing a 20-byte range read on the `.idx` for the offset, then a ranged `GET` on the `.zst` for the frame — all cached at the edge, so warm reads are sub-30ms and skip both D1 and R2 entirely. The **client SDK** caches routing and idx files locally so repeat lookups on the same epoch are near-free, and exposes a `getEpochArchive` path that bypasses the proxy entirely for bulk workloads.
 
 ## Operating the archive yourself
 
