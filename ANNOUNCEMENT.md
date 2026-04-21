@@ -32,7 +32,7 @@ If BLS verification fails on any checkpoint, the whole epoch aborts. Nothing ent
 
 **The proxy** is a Cloudflare Worker written in Hono/TypeScript. It exposes a small API:
 
-- `GET /checkpoints/:seq` returns the raw `.binpb.zst` bytes for a single checkpoint, resolved by a single D1 query, a 20-byte range read of the epoch's `.idx`, and a final ranged `GET` against R2.
+- `GET /:seq` returns the raw `.binpb.zst` bytes for a single checkpoint, resolved by a single D1 query, a 20-byte range read of the epoch's `.idx`, and a final ranged `GET` against R2.
 - `GET /epochs` returns metadata for every indexed epoch.
 - `GET /epochs/:N` returns metadata for one epoch, including object keys so clients can pull the whole epoch directly from R2 for bulk work.
 - `GET /health` returns summary stats.
@@ -56,13 +56,13 @@ That's a roughly **175x reduction in one-time Class A ingest cost**, with no dow
 
 Bulk download cost (serving the whole archive to one consumer) is where per-epoch really wins. Per-epoch: 1,103 GetObjects = $0.0004. Per-checkpoint: 71.4M GetObjects = $25.70. A roughly 85,000x difference for the bulk-analytics path.
 
-Range reads benefit from the same structure. Instead of exposing a `/checkpoints/:from/:to` endpoint that would fragment the cache namespace, we rely on the fact that clients wanting a contiguous range can either parallel-fetch per-checkpoint URLs (which multiplex over HTTP/2 and benefit from edge caching) or download the whole epoch's `.zst` directly from R2 in a single request and slice it locally with the `.idx`. Both approaches are cache-friendly and cheap; the dropped endpoint was the only cache-hostile shape in the API.
+Range reads benefit from the same structure. Instead of exposing a ``range endpoint` (dropped)` endpoint that would fragment the cache namespace, we rely on the fact that clients wanting a contiguous range can either parallel-fetch per-checkpoint URLs (which multiplex over HTTP/2 and benefit from edge caching) or download the whole epoch's `.zst` directly from R2 in a single request and slice it locally with the `.idx`. Both approaches are cache-friendly and cheap; the dropped endpoint was the only cache-hostile shape in the API.
 
-**No range endpoint.** We originally offered `/checkpoints/:from/:to` for bulk range reads. We removed it. The reason is cache economics. Per-checkpoint URLs live in a bounded namespace of 71 million, so hot ones cache well at the edge. Range URLs live in a combinatorial namespace of roughly 5 quadrillion possible `(from, to)` pairs; almost every range request is unique and misses the cache, punching through to D1 and R2 on every hit. Clients that want multiple checkpoints either issue parallel per-checkpoint requests, which multiplex cleanly over HTTP/2 and benefit from edge caching, or download the whole epoch directly from R2.
+**No range endpoint.** We originally offered ``range endpoint` (dropped)` for bulk range reads. We removed it. The reason is cache economics. Per-checkpoint URLs live in a bounded namespace of 71 million, so hot ones cache well at the edge. Range URLs live in a combinatorial namespace of roughly 5 quadrillion possible `(from, to)` pairs; almost every range request is unique and misses the cache, punching through to D1 and R2 on every hit. Clients that want multiple checkpoints either issue parallel per-checkpoint requests, which multiplex cleanly over HTTP/2 and benefit from edge caching, or download the whole epoch directly from R2.
 
 **D1 stores only what isn't derivable.** No per-checkpoint rows, no object keys that follow convention, no counts that can be computed. Six columns total: epoch, first_seq, last_seq, zst_bytes, zst_sha256, idx_sha256. One row per epoch. 1,103 rows for all of Sui mainnet history. D1 queries at this size are effectively instant.
 
-**Edge caching as a first-class deployment layer.** Every `/checkpoints/:seq` response gets `cache-control: public, max-age=31536000, immutable` and is stored in Cloudflare's Cache API. After the first hit on any edge PoP, subsequent requests in that region skip the Worker runtime, skip D1, skip R2, and return from edge RAM. This is the primary mechanism that makes the service scale for free.
+**Edge caching as a first-class deployment layer.** Every `/:seq` response gets `cache-control: public, max-age=31536000, immutable` and is stored in Cloudflare's Cache API. After the first hit on any edge PoP, subsequent requests in that region skip the Worker runtime, skip D1, skip R2, and return from edge RAM. This is the primary mechanism that makes the service scale for free.
 
 **Worker and R2 in the same provider.** The binding between the Worker and R2 is a direct API call within Cloudflare's private backbone. There is no public internet hop between them on cache misses. No request signing, no TLS handshake per call. This keeps miss-path latency low.
 
@@ -118,7 +118,7 @@ Fetch one checkpoint by sequence number:
 
 ```bash
 curl -o checkpoint.binpb.zst \
-  https://checkpoints.mainnet.sui.unconfirmed.cloud/checkpoints/12345678
+  https://checkpoints.mainnet.sui.unconfirmed.cloud/12345678
 zstd -d checkpoint.binpb.zst -o checkpoint.binpb
 ```
 

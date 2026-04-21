@@ -1,6 +1,6 @@
 /**
  * Load test. Compares three modes:
- *   1. proxy only                    — /checkpoints/:seq on the Worker
+ *   1. proxy only                    — /:seq on the Worker
  *   2. direct-R2, cold idx           — fetch idx on first hit per epoch, then range-GET zst
  *   3. direct-R2, warmed idx         — all idx prefetched via warmup, just range-GET zst
  */
@@ -107,7 +107,7 @@ async function main() {
   const rnd = () => Math.floor(Math.random() * maxSeq);
 
   // ── Mode 1: proxy only ───────────────────────────────────────────────
-  console.log("# Mode 1: proxy (always /checkpoints/:seq on Worker)");
+  console.log("# Mode 1: proxy (always /:seq on Worker)");
   console.log(fmt(await runBatch(proxyClient, "proxy cold conc=128", 1500, 128, rnd)));
   console.log();
 

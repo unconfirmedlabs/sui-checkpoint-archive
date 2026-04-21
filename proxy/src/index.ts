@@ -154,7 +154,10 @@ app.get("/epochs/:epoch", async (c) => {
 // Single-checkpoint fetch. Returns raw `.binpb.zst` bytes (one zstd frame).
 // BLS-verified at ingest; clients who want to re-verify use the shared
 // `sui-checkpoint-verifier` crate (see README).
-app.get("/checkpoints/:seq", async (c) =>
+//
+// Path is just the seq: the subdomain already qualifies the resource type
+// as checkpoints. Regex guard prevents overlap with /health, /epochs/*.
+app.get("/:seq{[0-9]+}", async (c) =>
   withEdgeCache(c, async () => {
     const raw = c.req.param("seq");
     let seq: bigint;
