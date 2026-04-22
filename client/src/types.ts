@@ -65,13 +65,6 @@ export interface ClientConfig {
    */
   routingTtlSec?: number;
 
-  /**
-   * Enable client-side BLS re-verification of every checkpoint returned by
-   * `getCheckpoint`. Defaults to false. When true, the optional wasm BLS
-   * verifier is lazily imported on first use.
-   */
-  verify?: boolean;
-
   /** Custom fetch for tests or non-standard runtimes. Defaults to global fetch. */
   fetch?: typeof fetch;
 }

@@ -513,3 +513,93 @@ mod wasm_abi {
         }
     }
 }
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    const PROXY: &str = "https://checkpoints.mainnet.sui.unconfirmed.cloud";
+
+    // Epoch 499 last checkpoint = committee source for epoch 500.
+    // Epoch 500 first checkpoint = what we verify against that committee.
+    const EOE_SEQ: u64   = 50840098;
+    const CHECK_SEQ: u64 = 50840099;
+    const EPOCH: u64     = 500;
+
+    fn fetch(url: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        ureq::get(url)
+            .call()
+            .expect("HTTP request failed")
+            .into_reader()
+            .read_to_end(&mut buf)
+            .expect("read body");
+        buf
+    }
+
+    fn get_committee() -> Vec<u8> {
+        let zst = fetch(&format!("{PROXY}/{EOE_SEQ}.binpb.zst"));
+        let proto = zstd_decode(&zst).expect("decompress eoe");
+        extract_next_committee(&proto).expect("extract committee")
+    }
+
+    fn get_checkpoint_proto() -> Vec<u8> {
+        let zst = fetch(&format!("{PROXY}/{CHECK_SEQ}.binpb.zst"));
+        zstd_decode(&zst).expect("decompress checkpoint")
+    }
+
+    #[test]
+    fn valid_checkpoint_passes() {
+        let committee = get_committee();
+        let proto     = get_checkpoint_proto();
+        verify_checkpoint(&proto, &committee, EPOCH).expect("valid checkpoint should verify");
+    }
+
+    #[test]
+    fn tampered_summary_fails() {
+        let committee = get_committee();
+        let mut proto = get_checkpoint_proto();
+
+        // Locate summary_bcs via pointer arithmetic, flip bytes in the middle.
+        let offset = {
+            let parsed = parse_proto(&proto).expect("parse");
+            let mid = parsed.summary_bcs.as_ptr() as usize
+                - proto.as_ptr() as usize
+                + parsed.summary_bcs.len() / 2;
+            mid
+        };
+        proto[offset]     ^= 0xFF;
+        proto[offset + 1] ^= 0xFF;
+
+        let err = verify_checkpoint(&proto, &committee, EPOCH)
+            .expect_err("tampered summary must fail");
+        eprintln!("tampered summary error: {err}");
+    }
+
+    #[test]
+    fn tampered_signature_fails() {
+        let committee = get_committee();
+        let proto     = get_checkpoint_proto();
+
+        // Parse to get the sig bytes, rebuild proto with sig inverted.
+        let parsed = parse_proto(&proto).expect("parse");
+        let mut tampered = proto.clone();
+
+        // Find the sig in the proto by scanning for the exact 48-byte sequence.
+        let sig = parsed.sig;
+        let pos = tampered
+            .windows(48)
+            .position(|w| w == sig)
+            .expect("sig bytes must appear in proto");
+        for b in &mut tampered[pos..pos + 48] {
+            *b ^= 0xFF;
+        }
+
+        let err = verify_checkpoint(&tampered, &committee, EPOCH)
+            .expect_err("tampered signature must fail");
+        eprintln!("tampered signature error: {err}");
+    }
+}

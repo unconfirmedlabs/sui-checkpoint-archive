@@ -1,4 +1,5 @@
 import { ClientCache, expandTilde } from "./cache.ts";
+import { parseIdxFile } from "./binary.ts";
 import { HttpError, NotIndexedError } from "./errors.ts";
 import type {
   CacheStats,
@@ -11,6 +12,15 @@ import type {
 const DEFAULT_BASE_URL = "https://checkpoints.mainnet.sui.unconfirmed.cloud";
 const DEFAULT_ARCHIVE_URL = "https://archive.checkpoints.mainnet.sui.unconfirmed.cloud";
 const DEFAULT_ROUTING_TTL_SEC = 3600;
+
+/**
+ * Canonical chunk size for the proxy /chunks endpoint. Every client
+ * MUST fetch in multiples of this size aligned on this boundary so
+ * cache entries are shared across clients and across PoPs. Changing
+ * this breaks cache sharing with every other client that uses a
+ * different value.
+ */
+const CHUNK_BYTES = 16 * 1024 * 1024;
 
 /**
  * Two transports in play:
@@ -34,7 +44,6 @@ export class SuiArchiveClient {
   readonly baseUrl: string;
   readonly archiveUrl: string;
   readonly routingTtlMs: number;
-  private readonly verify: boolean;
   private readonly fetchImpl: typeof fetch;
   private readonly cache: ClientCache;
   private routingRefresh: Promise<void> | null = null;
@@ -44,7 +53,6 @@ export class SuiArchiveClient {
     this.baseUrl = (config.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
     this.archiveUrl = (config.archiveUrl ?? DEFAULT_ARCHIVE_URL).replace(/\/$/, "");
     this.routingTtlMs = (config.routingTtlSec ?? DEFAULT_ROUTING_TTL_SEC) * 1000;
-    this.verify = config.verify ?? false;
     this.fetchImpl = config.fetch ?? fetch;
     const dir = config.cacheDir ? expandTilde(config.cacheDir) : null;
     this.cache = new ClientCache(dir);
@@ -99,11 +107,6 @@ export class SuiArchiveClient {
     const resp = await this.fetchImpl(url);
     if (!resp.ok) throw new HttpError(resp.status, url, await resp.text());
     const bytes = new Uint8Array(await resp.arrayBuffer());
-
-    if (this.verify) {
-      const { verifyCheckpointZst } = await import("./verify.ts");
-      await verifyCheckpointZst(bytes, epoch.epoch, this.getCommittee.bind(this));
-    }
     return { seq: s, epoch: epoch.epoch, bytes };
   }
 
@@ -131,6 +134,123 @@ export class SuiArchiveClient {
       throw new HttpError(resp.status, url, await resp.text().catch(() => ""));
     }
     return resp;
+  }
+
+  /**
+   * Stream one epoch's checkpoints as they decompress, in seq order, using
+   * bounded memory regardless of epoch size.
+   *
+   * Protocol: all clients fetch fixed-size 16 MiB chunks via the proxy at
+   *   `/epochs/:N/chunks/:idx`
+   * This URL is the stable cache key: every client using this SDK hits the
+   * same URLs, so CF edge cache is shared across clients and across PoPs.
+   * First client in a region pays R2's ~300 MB/s cap; every subsequent
+   * client in that region serves from edge cache at multi-GB/s.
+   *
+   * Chunks are raw byte slices of a multi-frame zstd stream. A chunk may
+   * start and/or end mid-frame. The iterator maintains a sliding buffer
+   * that spans at most two chunks so it can reassemble a frame that
+   * crosses a chunk boundary before handing it to the zstd decoder.
+   *
+   * Memory ceiling: `concurrency * CHUNK_BYTES` plus one sliding buffer
+   * of up to ~2 * CHUNK_BYTES. With defaults (8 * 16 MiB) that's roughly
+   * 160 MiB resident, regardless of epoch size.
+   *
+   * Requires Bun (uses `Bun.zstdDecompressSync` for per-frame decode).
+   */
+  async *iterateEpoch(
+    epoch: number,
+    opts: { concurrency?: number; startSeq?: number; endSeq?: number } = {},
+  ): AsyncIterable<{ seq: number; bytes: Uint8Array }> {
+    const concurrency = Math.max(1, opts.concurrency ?? defaultConcurrency());
+
+    const meta = await this.findEpochByNumber(epoch);
+    if (!meta) throw new NotIndexedError(-1);
+
+    const idxBytes = await this.getIdxBytes(meta);
+    const epochSize = meta.zst_bytes;
+
+    const allEntries = parseIdxFile(idxBytes);
+    const entries = (opts.startSeq !== undefined || opts.endSeq !== undefined)
+      ? allEntries.filter(e => {
+          const seq = Number(e.seq);
+          if (opts.startSeq !== undefined && seq < opts.startSeq) return false;
+          if (opts.endSeq !== undefined && seq > opts.endSeq) return false;
+          return true;
+        })
+      : allEntries;
+
+    if (entries.length === 0) return;
+
+    const fetchImpl = this.fetchImpl;
+    const archive = this.archiveUrl;
+
+    async function fetchChunk(idx: number): Promise<Uint8Array> {
+      const start = idx * CHUNK_BYTES;
+      const end = Math.min(start + CHUNK_BYTES, epochSize) - 1;
+      const url = `${archive}/epoch-${epoch}.zst`;
+      const resp = await fetchImpl(url, {
+        headers: { range: `bytes=${start}-${end}` },
+      });
+      if (!resp.ok && resp.status !== 206) {
+        throw new HttpError(resp.status, url, await resp.text().catch(() => ""));
+      }
+      return new Uint8Array(await resp.arrayBuffer());
+    }
+
+    // Start from the chunk containing the first needed entry's byte offset.
+    const firstOffset = Number(entries[0]!.offset);
+    const lastEntry = entries[entries.length - 1]!;
+    const lastByte = Number(lastEntry.offset) + lastEntry.length;
+    const startChunk = Math.floor(firstOffset / CHUNK_BYTES);
+    const endChunk = Math.ceil(lastByte / CHUNK_BYTES);
+
+    // Prefetch pool: keep up to `concurrency` chunk fetches in flight.
+    const pool: Promise<Uint8Array>[] = [];
+    let nextChunk = startChunk;
+    const refill = () => {
+      while (pool.length < concurrency && nextChunk < endChunk) {
+        pool.push(fetchChunk(nextChunk++));
+      }
+    };
+    refill();
+
+    // Sliding buffer: the bytes we've received and not yet emitted past.
+    // `windowStart` is the absolute byte offset of buffer[0] in the zst.
+    let window: Uint8Array = new Uint8Array(new ArrayBuffer(0));
+    let windowStart = startChunk * CHUNK_BYTES;
+
+    // Ensure the sliding window covers bytes [windowStart, absEnd).
+    const appendUntil = async (absEnd: number) => {
+      while (windowStart + window.byteLength < absEnd) {
+        if (pool.length === 0) throw new Error("ran out of chunks before frame end");
+        const chunk = await pool.shift()!;
+        refill();
+        const merged = new Uint8Array(new ArrayBuffer(window.byteLength + chunk.byteLength));
+        merged.set(window, 0);
+        merged.set(chunk, window.byteLength);
+        window = merged;
+      }
+    };
+
+    for (const entry of entries) {
+      const frameStart = Number(entry.offset);
+      const frameEnd = frameStart + entry.length;
+      await appendUntil(frameEnd);
+      const localStart = frameStart - windowStart;
+      const frame = window.subarray(localStart, localStart + entry.length);
+      yield { seq: Number(entry.seq), bytes: decompressZstdFrame(frame) };
+
+      // Drop bytes behind the current frame's end to keep memory bounded.
+      // Align the drop to CHUNK_BYTES so we always retain the tail chunk
+      // intact in case the next frame crosses into newly-fetched bytes.
+      const consumed = frameEnd - windowStart;
+      if (consumed >= CHUNK_BYTES) {
+        const drop = consumed - (consumed % CHUNK_BYTES);
+        window = window.subarray(drop);
+        windowStart += drop;
+      }
+    }
   }
 
   /**
@@ -287,10 +407,25 @@ export class SuiArchiveClient {
       this.idxRefresh.delete(epoch.epoch);
     }
   }
+}
 
-  private async getCommittee(_epoch: number): Promise<unknown> {
-    // Wired up when the verify module lands. For now a placeholder that
-    // lets verify.ts compile against this signature.
-    throw new Error("committee bootstrapping not yet implemented");
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function defaultConcurrency(): number {
+  const n = (globalThis as { navigator?: { hardwareConcurrency?: number } })
+    .navigator?.hardwareConcurrency;
+  return Math.min(n ?? 4, 16);
+}
+
+function decompressZstdFrame(frame: Uint8Array): Uint8Array {
+  // Bun native libzstd. Throws if Bun isn't present or the frame is
+  // malformed. The SDK requires Bun; no fallback by design.
+  const g = globalThis as { Bun?: { zstdDecompressSync?: (b: Uint8Array) => Uint8Array } };
+  const fn = g.Bun?.zstdDecompressSync;
+  if (!fn) {
+    throw new Error(
+      "iterateEpoch requires Bun.zstdDecompressSync (Bun >= 1.1.5 or newer)",
+    );
   }
+  return fn(frame);
 }

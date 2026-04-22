@@ -106,11 +106,23 @@ async function withEdgeCache(
   const cache = caches.default;
   const hit = await cache.match(cacheKey);
   if (hit) return hit;
-  const res = await build();
-  if (res.status >= 200 && res.status < 400) {
-    c.executionCtx.waitUntil(cache.put(cacheKey, res.clone()));
-  }
-  return res;
+
+  const origRes = await build();
+  if (origRes.status < 200 || origRes.status >= 400) return origRes;
+
+  // Fully buffer the body before caching. `res.clone()` on an R2-backed
+  // Response shares the underlying single-shot stream; whichever consumer
+  // (client vs cache.put) finishes first leaves the other with a partial
+  // body. Materializing the bytes once and rebuilding the Response gives
+  // both consumers independent buffer-backed streams, so cache entries
+  // are always complete.
+  const bytes = await origRes.arrayBuffer();
+  const buffered = new Response(bytes, {
+    status: origRes.status,
+    headers: origRes.headers,
+  });
+  c.executionCtx.waitUntil(cache.put(cacheKey, buffered.clone()));
+  return buffered;
 }
 
 // ── App ──────────────────────────────────────────────────────────────────────
